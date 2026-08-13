@@ -1,8 +1,8 @@
-streamlit>=1.37
-pandas>=2.0
-numpy>=1.24
-openpyxl>=3.1
-xlrd>=2.0
-python-calamine>=0.2
-python-pptx>=0.6.23
-matplotlib>=3.7
+streamlit==1.61.1
+pandas==3.0.2
+numpy==2.4.4
+openpyxl==3.1.5
+xlrd==2.0.2
+python-calamine==0.8.2
+python-pptx==1.0.2
+matplotlib==3.10.8
