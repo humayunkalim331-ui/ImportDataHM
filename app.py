@@ -127,7 +127,7 @@ def render_category_and_item_section():
         n = len(items_mod.get_items_for_category(cd["key"], st.session_state.removed_items, st.session_state.custom_items))
         with col:
             btn_type = "primary" if st.session_state.category == cd["key"] else "secondary"
-            if st.button(f"{cd['label']} ({n})", key=f"cat_{cd['key']}", use_container_width=True, type=btn_type):
+            if st.button(f"{cd['label']} ({n})", key=f"cat_{cd['key']}", width='stretch', type=btn_type):
                 st.session_state.category = cd["key"]
                 st.session_state.selected = None
                 st.rerun()
@@ -261,7 +261,7 @@ def render_competitor_grid(rows, mapping, company_role):
                     "Currency": r.get(mapping.get("currency"), "") if mapping.get("currency") else "",
                     "Qty": f"{q:,.0f}" if q is not None else "",
                 })
-            st.dataframe(pd.DataFrame(table_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(table_rows), hide_index=True, width='stretch')
             if len(company_rows) > 25:
                 st.caption(f"+{len(company_rows) - 25} more shipments")
 
@@ -288,7 +288,7 @@ def render_top_table(rows, mapping, name_role, name_label, extras):
         rec["Qty (KGS)"] = f"{v['qty']:,.0f}"
         rec["Unit Price"] = f"{v['priceAvg']:.2f} {v['currency'] or ''}".strip() if v["priceAvg"] is not None else "—"
         records.append(rec)
-    st.dataframe(pd.DataFrame(records), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(records), hide_index=True, width='stretch')
 
 
 def render_landed_cost(rows, mapping, headers):
@@ -313,7 +313,7 @@ def render_landed_cost(rows, mapping, headers):
         {"#": i + 1, "Supplier (Exporter)": name, "Qty (KGS)": f"{qty:,.0f}", "Landed Cost / KG (PKR)": f"{lc:.2f}"}
         for i, (name, lc, qty) in enumerate(ranked)
     ])
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width='stretch')
 
 
 def render_region_table(rows, mapping, region_role):
@@ -330,7 +330,7 @@ def render_region_table(rows, mapping, region_role):
          "Qty": f"{v['qty']:,.0f}"}
         for name, v in top
     ])
-    st.dataframe(df, hide_index=True, use_container_width=True)
+    st.dataframe(df, hide_index=True, width='stretch')
 
 
 def render_company_month_matrix(rows, mapping, company_role, label):
@@ -357,7 +357,7 @@ def render_company_month_matrix(rows, mapping, company_role, label):
                 avg = cell["wsum"] / cell["wqty"] if cell["wqty"] > 0 else (cell["sum"] / cell["n"] if cell["n"] else 0)
                 row_out[col_label] = f"{cell['qty']:,.0f} @ {avg:.2f}"
         records.append(row_out)
-    st.dataframe(pd.DataFrame(records), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(records), hide_index=True, width='stretch')
     st.caption("Each cell: total quantity @ quantity-weighted average unit price, by month.")
 
 
@@ -505,7 +505,7 @@ def render_detail(uid):
     st.markdown("##### Price trend")
     fig = charts.build_trend_figure(imp_rows, imp_mapping, exp_rows, exp_mapping, wits_rows, wits_mapping, manual)
     if fig:
-        st.pyplot(fig, use_container_width=True)
+        st.pyplot(fig, width='stretch')
         st.caption("Vertical axis is unit price, horizontal axis is shipment date — each dot is one matched "
                    "shipment, not an average.")
     else:
