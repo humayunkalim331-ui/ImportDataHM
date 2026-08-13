@@ -52,11 +52,22 @@ def _table_name(file_key):
 
 
 def init_table(file_key, headers):
-    """Creates (or confirms) the table for this file type, with one TEXT column per header."""
+    """Creates the table for this file type if it doesn't exist, and adds any columns from
+    this upload that an existing table doesn't already have — a second upload with slightly
+    different columns (common across different months' reports) shouldn't crash the insert."""
     client = get_client()
     table = _table_name(file_key)
     cols_sql = ", ".join(f"{_safe_col_name(h)} TEXT" for h in headers)
     client.execute(f"CREATE TABLE IF NOT EXISTS {table} (_row_id INTEGER PRIMARY KEY AUTOINCREMENT, {cols_sql})")
+
+    rs = client.execute(f"SELECT * FROM {table} LIMIT 0")
+    existing_cols = set(rs.columns)
+    for h in headers:
+        if h not in existing_cols:
+            try:
+                client.execute(f"ALTER TABLE {table} ADD COLUMN {_safe_col_name(h)} TEXT")
+            except Exception:
+                pass  # column may already exist from a concurrent upload — non-fatal either way
     return table
 
 
@@ -115,6 +126,8 @@ def _insert_chunk(client, table, headers, rows_chunk):
 def stream_upload_xlsx(file_key, file_path_or_stream, existing_headers=None):
     """Streams an .xlsx file into the database using openpyxl's read_only mode — never
     loads the full sheet into memory, regardless of file size."""
+    if hasattr(file_path_or_stream, "seek"):
+        file_path_or_stream.seek(0)
     wb = openpyxl.load_workbook(file_path_or_stream, read_only=True, data_only=True)
     ws = wb.active
     row_iter = ws.iter_rows(values_only=True)
@@ -143,6 +156,8 @@ def stream_upload_xlsx(file_key, file_path_or_stream, existing_headers=None):
 
 def stream_upload_csv(file_key, file_stream):
     """Streams a .csv file into the database in chunks, same memory-flat approach as xlsx."""
+    if hasattr(file_stream, "seek"):
+        file_stream.seek(0)
     text_stream = (line.decode("utf-8", errors="replace") if isinstance(line, bytes) else line
                    for line in file_stream)
     reader = csv.reader(text_stream)

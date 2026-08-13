@@ -16,6 +16,25 @@ CURRENCY_CODES = {
 }
 
 
+KG_PER_MT = 1000
+
+
+def fmt_qty_mt(qty_kg):
+    """Quantity display in MT (director-requested unit), converted from the underlying KG data."""
+    if qty_kg is None:
+        return "—"
+    return f"{qty_kg / KG_PER_MT:,.2f}"
+
+
+def fmt_price_per_mt(price_per_kg, currency=None):
+    """Per-unit price converted to a per-MT basis, kept consistent with qty being shown in
+    MT — showing MT quantities next to a $/KG price would be a confusing unit mismatch."""
+    if price_per_kg is None:
+        return "—"
+    val = price_per_kg * KG_PER_MT
+    return f"{val:,.2f}{' ' + currency if currency else ''}"
+
+
 def num(v):
     if v is None or v == "":
         return None
@@ -305,14 +324,22 @@ def full_company_month_matrix(rows, mapping, company_role, max_companies):
 LANDED_COST_FIELD_CANDIDATES = {
     "importValuePkr": ["Import Value in PKR"],
     "paidCustomsDuty": ["Paid Customs Duty"],
-    "paidSalesTax": ["Paid Sales Tax"],
-    "paidIncomeTax": ["Paid Income Tax"],
-    "additionalSalesTax": ["Additional Sales Tax"],
+    "paidSalesTax": ["Paid Sales Tax"],           # detected but NOT included — see EXCLUDED_FROM_LANDED_COST
+    "paidIncomeTax": ["Paid Income Tax"],         # detected but NOT included
+    "additionalSalesTax": ["Additional Sales Tax"],  # detected but NOT included
     "additionalCustomsDuty": ["Additional Customs Duty"],
     "fed": ["Federal Excise Duty"],
     "specialFed": ["Special FED"],
     "otherTaxes": ["Other Taxes"],
 }
+
+# Columns actually summed into landed cost. Sales Tax and Income Tax are deliberately
+# excluded: Sales Tax is a recoverable input tax credit for a registered business (not a
+# real cost — it's reclaimed against output tax), and Income Tax withheld at import is an
+# advance payment against the importer's own income tax liability, not a cost of the goods.
+# Customs Duty and FED are non-recoverable and genuinely embedded in the landed cost.
+LANDED_COST_INCLUDED_KEYS = ["paidCustomsDuty", "additionalCustomsDuty", "fed", "specialFed", "otherTaxes"]
+LANDED_COST_EXCLUDED_KEYS = ["paidSalesTax", "paidIncomeTax", "additionalSalesTax"]
 
 
 def detect_landed_cost_columns(headers):
@@ -329,19 +356,42 @@ def detect_landed_cost_columns(headers):
     return found
 
 
+def landed_cost_formula_text(cols):
+    """Human-readable formula for the columns actually present in this file — shown on
+    screen and in the PPT so the calculation isn't a black box."""
+    parts = ["Import Value in PKR"]
+    labels = {
+        "paidCustomsDuty": "Paid Customs Duty", "additionalCustomsDuty": "Additional Customs Duty",
+        "fed": "Federal Excise Duty", "specialFed": "Special FED", "otherTaxes": "Other Taxes",
+    }
+    for k in LANDED_COST_INCLUDED_KEYS:
+        if k in cols:
+            parts.append(labels[k])
+    formula = " + ".join(parts) + "  ÷  Quantity"
+    excluded_present = [k for k in LANDED_COST_EXCLUDED_KEYS if k in cols]
+    note = ""
+    if excluded_present:
+        excl_labels = {"paidSalesTax": "Sales Tax", "paidIncomeTax": "Income Tax", "additionalSalesTax": "Additional Sales Tax"}
+        note = (f" Sales Tax and Income Tax ({', '.join(excl_labels[k] for k in excluded_present)}) are "
+                f"intentionally excluded — Sales Tax is a recoverable input tax credit and Income Tax "
+                f"withheld at import is an advance against the company's own tax liability, so neither is "
+                f"a real cost of the goods. Customs Duty and FED are non-recoverable, so they're included.")
+    return formula, note
+
+
 def landed_cost_per_unit(row, cols, qty):
     if "importValuePkr" not in cols or not qty or qty <= 0:
         return None
     total = num(row.get(cols["importValuePkr"]))
     if total is None:
         return None
-    for k in ["paidCustomsDuty", "paidSalesTax", "paidIncomeTax", "additionalSalesTax",
-              "additionalCustomsDuty", "fed", "specialFed", "otherTaxes"]:
+    for k in LANDED_COST_INCLUDED_KEYS:
         if k in cols:
             v = num(row.get(cols[k]))
             if v is not None:
                 total += v
     return total / qty
+
 
 
 def landed_cost_ranked(rows, mapping, headers, company_role, limit=10):

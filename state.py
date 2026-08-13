@@ -1,21 +1,16 @@
 """
 Session state + persistence glue. Mirrors the original tool's `state` object and its
-load/save functions, backed by kv_store instead of window.storage/IndexedDB.
+load/save functions.
 
-Important difference from the original: the original persisted to the browser's local
-storage, so each person's uploads/custom items were private to their own browser. This
-app persists to a shared server-side store (kv_store), so custom items, manual positions,
-and HS Code overrides are shared across everyone who uses this deployment — which suits a
-small team all reviewing the same procurement data, but is worth knowing about.
-
-Uploaded customs data (the `rows` DataFrame) is intentionally session-only, NOT persisted
-via kv_store. It used to be pickled into SQLite on every upload, but that briefly held a
-second full copy of the data in memory (measured: +40MB+ for a 100k-row file) on top of the
-live copy already in session_state — on Render's free tier (512MB RAM), that was pushing
-peak memory close to the ceiling and very likely causing the process to crash and the
-browser to reconnect with a wiped session. It also doesn't reliably survive a crash anyway,
-since the SQLite file sits on the same ephemeral disk. Re-uploading after a disconnect is
-the honest tradeoff on free tier, not a bug — see render_upload_section()'s caption.
+Uploaded customs data streams directly into the database (db_store.py — Turso when
+configured, a local file otherwise) instead of being held as a full in-memory DataFrame.
+Only small metadata (headers, column mapping, upload history, row count) lives in
+session_state and kv_store — safe to persist regardless of how large the actual file is,
+since it's a few KB either way. This is what makes "upload once, don't lose it on reload"
+actually work: the metadata AND the underlying rows both persist through kv_store/db_store,
+not just one of them — as long as TURSO_DATABASE_URL / TURSO_AUTH_TOKEN are configured. If
+they aren't, both fall back to a local file that's still wiped on a Render restart, exactly
+like before — persistence genuinely depends on that Turso setup being done.
 """
 from datetime import datetime
 
@@ -23,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 import kv_store
+import db_store
 from items import CATEGORY_KEYS, FILE_TYPES
 
 
@@ -36,10 +32,25 @@ def init_state():
     st.session_state.custom_items = kv_store.get("custom_items", None) or _empty_per_category()
     st.session_state.removed_items = kv_store.get("removed_items", None) or _empty_per_category()
     st.session_state.manual = kv_store.get("manual", {})
+    st.session_state.remarks = kv_store.get("remarks", {})
     st.session_state.hs_overrides = kv_store.get("hs_overrides", {})
 
-    # Uploaded file data is session-only — see module docstring. Always starts empty.
-    st.session_state.files = {ft["key"]: None for ft in FILE_TYPES}
+    # File metadata (small) persists via kv_store; the actual rows live in the database
+    # (db_store) and are queried on demand, never loaded in full.
+    files = {}
+    for ft in FILE_TYPES:
+        rec = kv_store.get(f"file_meta:{ft['key']}", None)
+        if rec:
+            # Reconcile with what's actually in the database — if the DB table is empty
+            # (e.g. local-file fallback got wiped by a restart) but metadata says otherwise,
+            # trust the database, not stale metadata.
+            actual_count = db_store.row_count(ft["key"])
+            if actual_count == 0 and rec.get("row_count", 0) > 0:
+                rec = None
+            elif rec:
+                rec["row_count"] = actual_count
+        files[ft["key"]] = rec
+    st.session_state.files = files
 
     st.session_state.setdefault("selected", None)
     st.session_state.setdefault("category", CATEGORY_KEYS[0])
@@ -72,6 +83,11 @@ def save_hs_override(uid, new_hs):
 def save_manual(uid, qty, price, currency, supplier):
     st.session_state.manual[uid] = {"qty": qty, "price": price, "currency": currency, "supplier": supplier}
     kv_store.set("manual", st.session_state.manual)
+
+
+def save_remarks(uid, text):
+    st.session_state.remarks[uid] = text
+    kv_store.set("remarks", st.session_state.remarks)
 
 
 def add_custom_item(cat, name, hs, origin="", plant="Custom"):
@@ -110,37 +126,8 @@ def restore_item(cat, uid):
 
 # ---------------- File upload / mapping ----------------
 
-def _read_excel_fast(uploaded_file):
-    # Measured directly against a real 104k-row file: the calamine engine (Rust-based, fast)
-    # uses ~680MB RSS to parse it — already over Render free tier's 512MB limit before Streamlit's
-    # own overhead is even added, which is what was crashing the app. openpyxl uses ~313MB for the
-    # same file — still not a large margin, but the difference between "guaranteed OOM" and
-    # "might fit." Trading calamine's speed for openpyxl's lower memory footprint on purpose.
-    try:
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, dtype=object, engine="openpyxl")
-    except Exception:
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, dtype=object, engine="calamine")
-
-
-def _read_upload(uploaded_file):
-    name = uploaded_file.name
-    ext = name.rsplit(".", 1)[-1].lower()
-    if ext in ("xlsx", "xls"):
-        df = _read_excel_fast(uploaded_file)
-    else:
-        try:
-            df = pd.read_csv(uploaded_file, dtype=object, encoding="utf-8")
-        except UnicodeDecodeError:
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file, dtype=object, encoding="latin-1")
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-
 def handle_upload(file_key, uploaded_file):
-    rec = st.session_state.files.get(file_key) or {"headers": [], "rows": pd.DataFrame(), "mapping": {}, "uploads": []}
+    rec = st.session_state.files.get(file_key) or {"headers": [], "mapping": {}, "uploads": [], "row_count": 0}
     size = uploaded_file.size
     is_dup = any(u["fileName"] == uploaded_file.name and u["size"] == size for u in rec["uploads"])
     if is_dup:
@@ -150,26 +137,38 @@ def handle_upload(file_key, uploaded_file):
         }
         return
 
-    new_df = _read_upload(uploaded_file)
-    new_headers = list(new_df.columns)
+    name = uploaded_file.name
+    ext = name.rsplit(".", 1)[-1].lower()
+    if ext in ("xlsx", "xls"):
+        new_headers, new_count = db_store.stream_upload_xlsx(file_key, uploaded_file)
+    else:
+        new_headers, new_count = db_store.stream_upload_csv(file_key, uploaded_file)
+
     rec["headers"] = list(dict.fromkeys([*rec["headers"], *new_headers]))
-    rec["rows"] = pd.concat([rec["rows"], new_df], ignore_index=True, sort=False) if len(rec["rows"]) else new_df
     rec["uploads"] = [*rec["uploads"], {
-        "fileName": uploaded_file.name, "size": size,
-        "uploadedAt": datetime.now().isoformat(), "rowCount": len(new_df),
+        "fileName": name, "size": size,
+        "uploadedAt": datetime.now().isoformat(), "rowCount": new_count,
     }]
+    rec["row_count"] = db_store.row_count(file_key)
+    if rec.get("mapping"):
+        db_store.ensure_indexes(file_key, rec["mapping"])
+
     st.session_state.upload_notice[file_key] = {
         "type": "ok",
-        "text": f'Added {len(new_df):,} rows from "{uploaded_file.name}". Total now: {len(rec["rows"]):,} rows across {len(rec["uploads"])} upload{"s" if len(rec["uploads"]) != 1 else ""}.',
+        "text": f'Added {new_count:,} rows from "{name}". Total now: {rec["row_count"]:,} rows across {len(rec["uploads"])} upload{"s" if len(rec["uploads"]) != 1 else ""}.',
     }
     save_file(file_key, rec)
 
 
 def save_file(file_key, rec):
     st.session_state.files[file_key] = rec
-    # Intentionally NOT persisted to kv_store — see module docstring.
+    kv_store.set(f"file_meta:{file_key}", rec)
+    if rec.get("mapping"):
+        db_store.ensure_indexes(file_key, rec["mapping"])
 
 
 def clear_file_data(file_key):
     st.session_state.files[file_key] = None
     st.session_state.upload_notice[file_key] = None
+    kv_store.delete(f"file_meta:{file_key}")
+    db_store.drop_table(file_key)

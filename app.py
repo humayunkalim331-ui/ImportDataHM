@@ -12,6 +12,7 @@ import aggregation as agg
 import insights as insights_mod
 import charts
 import pptx_export
+import market_data
 
 st.set_page_config(page_title="RM Procurement Analyzer — Gatronova", layout="wide", page_icon="📦")
 state.init_state()
@@ -23,11 +24,22 @@ div[data-testid="stMetricValue"] { color: #d4a755; }
 </style>
 """, unsafe_allow_html=True)
 
+import db_store
+
 @st.cache_data(show_spinner=False)
-def _cached_rows_for_item(df, mapping, item, file_key, period, period_from, period_to):
-    # rows_for_item scans the full uploaded dataset (can be 100k+ rows) — caching this means
-    # a checkbox click elsewhere on the page no longer re-runs the whole match from scratch.
-    return matching.rows_for_item(df, mapping, item, file_key, period, period_from, period_to)
+def _cached_rows_for_item(file_key, mapping_items, item_name, item_hs, period, period_from, period_to):
+    # Instead of scanning a full 100k+ row in-memory table, this runs a broad SQL pre-filter
+    # against the database (indexed on HS Code / Item Description) to narrow down to a small
+    # candidate set, THEN hands that small set to the exact same, already-tested precise
+    # matching logic. Caching key args are small/hashable now (no more hashing a huge
+    # DataFrame every rerun), and the underlying data no longer needs to fit in RAM at all.
+    mapping = dict(mapping_items)
+    headers, candidates = db_store.prefilter_candidates(file_key, mapping, item_name, item_hs)
+    if not candidates:
+        return pd.DataFrame()
+    cand_df = pd.DataFrame(candidates)
+    item = {"name": item_name, "hs": item_hs}
+    return matching.rows_for_item(cand_df, mapping, item, file_key, period, period_from, period_to)
 
 
 PERIOD_OPTIONS = [
@@ -45,7 +57,7 @@ def _file_summary_text():
     for ft in items_mod.FILE_TYPES:
         rec = st.session_state.files.get(ft["key"])
         label = ft["label"].split(" ")[0]
-        bits.append(f"{label}: {len(rec['rows']):,} rows" if rec else f"{label}: not uploaded")
+        bits.append(f"{label}: {rec['row_count']:,} rows" if rec else f"{label}: not uploaded")
     return "  ·  ".join(bits)
 
 
@@ -94,7 +106,7 @@ def render_file_card(ft):
         return
 
     last = rec["uploads"][-1]
-    st.caption(f"Total: **{len(rec['rows']):,} rows** across {len(rec['uploads'])} upload"
+    st.caption(f"Total: **{rec['row_count']:,} rows** across {len(rec['uploads'])} upload"
                f"{'s' if len(rec['uploads']) != 1 else ''}. Last added: {last['fileName']} — {last['rowCount']:,} rows.")
     if len(rec["uploads"]) > 1:
         with st.expander(f"Upload history ({len(rec['uploads'])})"):
@@ -258,11 +270,12 @@ def render_competitor_grid(rows, mapping, company_role):
                 d = r.get("_date")
                 d_str = d.strftime("%m/%d/%Y") if d is not None and not pd.isna(d) else "—"
                 q = agg.num(r.get(mapping.get("qty"))) if mapping.get("qty") else None
+                p = agg.num(r.get(price_col))
                 table_rows.append({
                     "Date": d_str,
-                    "Price": r.get(price_col, "—"),
+                    "Price (per MT)": agg.fmt_price_per_mt(p) if p is not None else r.get(price_col, "—"),
                     "Currency": r.get(mapping.get("currency"), "") if mapping.get("currency") else "",
-                    "Qty": f"{q:,.0f}" if q is not None else "",
+                    "Qty (MT)": agg.fmt_qty_mt(q) if q is not None else "",
                 })
             st.dataframe(pd.DataFrame(table_rows), hide_index=True, width='stretch')
             if len(company_rows) > 25:
@@ -288,8 +301,8 @@ def render_top_table(rows, mapping, name_role, name_label, extras):
             shown = ", ".join(str(x) for x in vals[:3])
             rest = len(vals) - 3
             rec[label] = shown + (f" +{rest} more" if rest > 0 else "") if vals else "—"
-        rec["Qty (KGS)"] = f"{v['qty']:,.0f}"
-        rec["Unit Price"] = f"{v['priceAvg']:.2f} {v['currency'] or ''}".strip() if v["priceAvg"] is not None else "—"
+        rec["Qty (MT)"] = agg.fmt_qty_mt(v['qty'])
+        rec["Unit Price (per MT)"] = agg.fmt_price_per_mt(v["priceAvg"], v["currency"])
         records.append(rec)
     st.dataframe(pd.DataFrame(records), hide_index=True, width='stretch')
 
@@ -308,12 +321,12 @@ def render_landed_cost(rows, mapping, headers):
             st.caption("Couldn't compute landed cost from the matched rows — check that quantity and PKR value "
                        "fields have numeric data.")
         return
-    st.caption("Ranked cheapest first — landed cost per KG = (Import Value in PKR + paid customs duty, sales tax, "
-               "income tax, and other paid duties/FED) ÷ quantity, quantity-weighted across shipments. This "
-               "reflects actual amounts paid, including any SRO exemptions already applied — not a statutory-rate "
-               "estimate.")
+    cols_detected = agg.detect_landed_cost_columns(headers)
+    formula, note = agg.landed_cost_formula_text(cols_detected)
+    st.info(f"**How this is calculated:** {formula}, quantity-weighted across shipments.{note}")
     df = pd.DataFrame([
-        {"#": i + 1, "Supplier (Exporter)": name, "Qty (KGS)": f"{qty:,.0f}", "Landed Cost / KG (PKR)": f"{lc:.2f}"}
+        {"#": i + 1, "Supplier (Exporter)": name, "Qty (MT)": agg.fmt_qty_mt(qty),
+         "Landed Cost / MT (PKR)": agg.fmt_price_per_mt(lc)}
         for i, (name, lc, qty) in enumerate(ranked)
     ])
     st.dataframe(df, hide_index=True, width='stretch')
@@ -329,8 +342,8 @@ def render_region_table(rows, mapping, region_role):
     top = agg.aggregate_by(rows, region_col, mapping)[:6]
     df = pd.DataFrame([
         {"Region": name,
-         "Avg Unit Price": f"{v['priceAvg']:.2f} {v['currency'] or ''}".strip() if v["priceAvg"] is not None else "—",
-         "Qty": f"{v['qty']:,.0f}"}
+         "Avg Unit Price (per MT)": agg.fmt_price_per_mt(v["priceAvg"], v["currency"]),
+         "Qty (MT)": agg.fmt_qty_mt(v['qty'])}
         for name, v in top
     ])
     st.dataframe(df, hide_index=True, width='stretch')
@@ -358,10 +371,10 @@ def render_company_month_matrix(rows, mapping, company_role, label):
                 row_out[col_label] = "—"
             else:
                 avg = cell["wsum"] / cell["wqty"] if cell["wqty"] > 0 else (cell["sum"] / cell["n"] if cell["n"] else 0)
-                row_out[col_label] = f"{cell['qty']:,.0f} @ {avg:.2f}"
+                row_out[col_label] = f"{agg.fmt_qty_mt(cell['qty'])} MT @ {agg.fmt_price_per_mt(avg)}"
         records.append(row_out)
     st.dataframe(pd.DataFrame(records), hide_index=True, width='stretch')
-    st.caption("Each cell: total quantity @ quantity-weighted average unit price, by month.")
+    st.caption("Each cell: total quantity (MT) @ quantity-weighted average unit price (per MT), by month.")
 
 
 # ==================== Detail view ====================
@@ -389,6 +402,19 @@ def render_detail(uid):
     st.caption('If item descriptions vary in the customs data (e.g. "MONO ETHYLENE" vs "MONOETHYLENE"), correcting '
                'the HS Code here gives matching a reliable fallback.')
 
+    with st.expander("📈 Live market scenario (crude oil — base feedstock context)"):
+        st.caption("For products whose base material traces back to crude oil (e.g. petrochemical-derived "
+                   "raw materials), current oil prices give directional context for cost pressure.")
+        if st.button("Check current oil market", key=f"oil_check_{uid}"):
+            with st.spinner("Fetching live oil prices…"):
+                st.session_state[f"oil_data_{uid}"] = market_data.get_oil_prices()
+        oil_result = st.session_state.get(f"oil_data_{uid}")
+        if oil_result:
+            if oil_result.get("ok"):
+                st.markdown(market_data.format_oil_insight(oil_result))
+            else:
+                st.warning(market_data.format_oil_insight(oil_result))
+
     st.markdown("##### Data shown")
     st.caption("Some items only trade on one side. Toggle which comparisons to show here — the PPT export follows "
                "the same selection.")
@@ -400,8 +426,8 @@ def render_detail(uid):
 
     st.markdown("##### Our current position")
     p1, p2, p3, p4 = st.columns(4)
-    qty_in = p1.text_input("Quantity", value=str(manual.get("qty") or ""), key=f"m_qty_{uid}")
-    price_in = p2.text_input("Unit price", value=str(manual.get("price") or ""), key=f"m_price_{uid}")
+    qty_in = p1.text_input("Quantity (KG)", value=str(manual.get("qty") or ""), key=f"m_qty_{uid}")
+    price_in = p2.text_input("Unit price (per KG)", value=str(manual.get("price") or ""), key=f"m_price_{uid}")
     cur_idx = CURRENCIES.index(manual.get("currency")) if manual.get("currency") in CURRENCIES else 0
     currency_in = p3.selectbox("Currency", CURRENCIES, index=cur_idx, key=f"m_currency_{uid}")
     supplier_in = p4.text_input("Supplier", value=manual.get("supplier") or "", key=f"m_supplier_{uid}")
@@ -438,11 +464,11 @@ def render_detail(uid):
     wits_mapping = (wits_rec or {}).get("mapping", {}) or {}
 
     with st.spinner("Matching item against uploaded customs data…"):
-        imp_df = _cached_rows_for_item(imp_rec["rows"], imp_mapping, item, "import",
+        imp_df = _cached_rows_for_item("import", tuple(sorted(imp_mapping.items())), item["name"], item["hs"],
                                         st.session_state.period, period_from, period_to) if imp_rec else pd.DataFrame()
-        exp_df = _cached_rows_for_item(exp_rec["rows"], exp_mapping, item, "export",
+        exp_df = _cached_rows_for_item("export", tuple(sorted(exp_mapping.items())), item["name"], item["hs"],
                                         st.session_state.period, period_from, period_to) if exp_rec else pd.DataFrame()
-        wits_df = _cached_rows_for_item(wits_rec["rows"], wits_mapping, item, "wits",
+        wits_df = _cached_rows_for_item("wits", tuple(sorted(wits_mapping.items())), item["name"], item["hs"],
                                          st.session_state.period, period_from, period_to) if wits_rec else pd.DataFrame()
 
     imp_rows = imp_df.to_dict("records")
@@ -528,6 +554,15 @@ def render_detail(uid):
     for b in bullets:
         st.markdown(f"- {b}")
     st.caption("Auto-drafted from the figures above (rule-based, no external calls) — review before sharing.")
+
+    st.markdown("##### Remarks")
+    remarks_val = st.session_state.remarks.get(uid, "")
+    new_remarks = st.text_area("Add your own notes on this item's analysis", value=remarks_val,
+                                key=f"remarks_{uid}", height=100,
+                                placeholder="e.g. Discussed with supplier on 12 Aug — expects prices to firm up next quarter.")
+    if st.button("Save remarks", key=f"save_remarks_{uid}"):
+        state.save_remarks(uid, new_remarks)
+        st.success("Remarks saved.")
 
     st.markdown("##### Export")
     if st.button("Generate PPTX", key=f"ppt_gen_{uid}", type="primary"):

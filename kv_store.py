@@ -1,55 +1,54 @@
 """
-Small persistent key/value store backed by SQLite, mirroring the role the original
-HTML tool's `storageBackend` (window.storage / IndexedDB / localStorage) played:
-save uploaded customs data, column mappings, manual positions, custom items, etc.
-so they survive a page reload.
-
-Render note: a Render web service's local disk is ephemeral across deploys/restarts
-unless you attach a persistent disk. For real persistence in production, mount a
-Render Disk at DATA_DIR (or point DB_PATH at it) — otherwise data uploaded between
-deploys will be lost, same as it would with any other local-file approach.
+Small persistent key/value store — column mappings, custom items, manual positions,
+remarks, HS overrides. Shares the same connection as db_store.py (Turso when configured,
+a local file otherwise) so everything persists together consistently: if Turso is set up,
+both the big customs data AND these small settings survive a restart; if it isn't, both
+are equally ephemeral, rather than one persisting and the other silently not.
 """
-import os
 import pickle
-import sqlite3
-import threading
+import base64
 
-DATA_DIR = os.environ.get("RM_ANALYZER_DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH = os.path.join(DATA_DIR, "rm_analyzer.sqlite3")
+import db_store
 
-_lock = threading.Lock()
+_TABLE_READY = False
 
 
-def _connect():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value BLOB)")
-    return conn
-
-
-_conn = _connect()
+def _ensure_table():
+    global _TABLE_READY
+    if _TABLE_READY:
+        return
+    client = db_store.get_client()
+    client.execute("CREATE TABLE IF NOT EXISTS kv_store (key TEXT PRIMARY KEY, value TEXT)")
+    _TABLE_READY = True
 
 
 def get(key, default=None):
-    with _lock:
-        cur = _conn.execute("SELECT value FROM kv WHERE key = ?", (key,))
-        row = cur.fetchone()
-    if row is None:
-        return default
+    _ensure_table()
+    client = db_store.get_client()
     try:
-        return pickle.loads(row[0])
+        rs = client.execute("SELECT value FROM kv_store WHERE key = ?", [key])
+        if not rs.rows:
+            return default
+        return pickle.loads(base64.b64decode(rs.rows[0][0]))
     except Exception:
         return default
 
 
 def set(key, value):
-    blob = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-    with _lock:
-        _conn.execute("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, blob))
-        _conn.commit()
+    _ensure_table()
+    client = db_store.get_client()
+    blob = base64.b64encode(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)).decode("ascii")
+    client.execute(
+        "INSERT INTO kv_store (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [key, blob],
+    )
 
 
 def delete(key):
-    with _lock:
-        _conn.execute("DELETE FROM kv WHERE key = ?", (key,))
-        _conn.commit()
+    _ensure_table()
+    client = db_store.get_client()
+    try:
+        client.execute("DELETE FROM kv_store WHERE key = ?", [key])
+    except Exception:
+        pass
