@@ -112,6 +112,9 @@ def render_file_card(ft):
 
 def render_upload_section():
     st.caption(_file_summary_text())
+    st.caption("Uploaded data lives for this browser session only — if the app disconnects "
+               "or restarts, you'll need to re-upload. Column mappings, custom items, and "
+               "saved positions are not affected.")
     with st.expander("Manage data sources", expanded=st.session_state.uploads_expanded):
         cols = st.columns(3)
         for col, ft in zip(cols, items_mod.FILE_TYPES):
