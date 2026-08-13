@@ -15,7 +15,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from aggregation import (
     num, aggregate_by, dominant_currency_prices, weighted_average, monthly_pivot,
     full_company_month_matrix, landed_cost_ranked, compute_rank, month_label,
-    fmt_qty_mt, fmt_price_per_mt, detect_landed_cost_columns, landed_cost_formula_text,
+    fmt_qty_mt, fmt_price_per_kg, detect_landed_cost_columns, landed_cost_formula_text,
 )
 from matching import company_key
 from insights import build_series, build_insights_bullets
@@ -123,7 +123,7 @@ def _pptx_top_rows(rows, mapping, name_role, country_role):
         out.append([
             name, country_str,
             fmt_qty_mt(v['qty']) if v["qty"] else "—",
-            fmt_price_per_mt(v["priceAvg"], v["currency"]) if v["priceAvg"] is not None else "—",
+            fmt_price_per_kg(v["priceAvg"], v["currency"]) if v["priceAvg"] is not None else "—",
         ])
     return out
 
@@ -133,7 +133,7 @@ def _pptx_region_rows(rows, mapping, region_role):
         return []
     agg = aggregate_by(rows, mapping[region_role], mapping)[:6]
     return [[region, fmt_qty_mt(v['qty']) if v["qty"] else "—",
-              fmt_price_per_mt(v["priceAvg"], v["currency"]) if v["priceAvg"] is not None else "—"]
+              fmt_price_per_kg(v["priceAvg"], v["currency"]) if v["priceAvg"] is not None else "—"]
              for region, v in agg]
 
 
@@ -247,11 +247,11 @@ def build_pptx(item, manual, imp_rows, imp_mapping, has_import_file, imp_headers
             cheapest = min(priced, key=lambda x: x[1]["priceAvg"]) if priced else None
             narration = f"{leader[0]} is the largest matched importer by volume ({fmt_qty_mt(leader[1]['qty'])} MT)"
             if cheapest and cheapest[0] != leader[0]:
-                narration += f", while {cheapest[0]} offers the most competitive matched price at {fmt_price_per_mt(cheapest[1]['priceAvg'], cheapest[1]['currency'])}"
+                narration += f", while {cheapest[0]} offers the most competitive matched price at {fmt_price_per_kg(cheapest[1]['priceAvg'], cheapest[1]['currency'])}"
             narration += ". Compare these terms against our current supplier before the next order."
             s = _blank_slide(prs)
             _header(s, f"Top Importers — HS {item['hs']}")
-            th = _table(s, Inches(0.6), Inches(1.2), Inches(11.5), ["Importer", "Country", "Qty (MT)", "Unit Price (per MT)"], rows)
+            th = _table(s, Inches(0.6), Inches(1.2), Inches(11.5), ["Importer", "Country", "Qty (MT)", "Unit Price (per KG)"], rows)
             _text(s, Inches(0.6), Inches(1.2) + th + Inches(0.2), Inches(11.7), Inches(0.9), narration, size=12, color=GREY)
 
     # Slide 5 — Region-wise: imports
@@ -260,13 +260,13 @@ def build_pptx(item, manual, imp_rows, imp_mapping, has_import_file, imp_headers
         if rows:
             region_agg = aggregate_by(imp_rows, imp_mapping["origin"], imp_mapping)
             top_region = region_agg[0]
-            avg_str = fmt_price_per_mt(top_region[1]['priceAvg'], top_region[1]['currency']) if top_region[1]["priceAvg"] is not None else "n/a"
+            avg_str = fmt_price_per_kg(top_region[1]['priceAvg'], top_region[1]['currency']) if top_region[1]["priceAvg"] is not None else "n/a"
             narration = (f"{top_region[0]} is the dominant sourcing origin by volume for matched imports "
                          f"({fmt_qty_mt(top_region[1]['qty'])} MT), averaging {avg_str}.")
             narration += " Consider whether diversifying sourcing origins could reduce single-region dependency risk."
             s = _blank_slide(prs)
             _header(s, "Region-wise Comparison — Imports (by Country of Origin)")
-            th = _table(s, Inches(0.6), Inches(1.2), Inches(10.5), ["Country of Origin", "Qty (MT)", "Avg Unit Price (per MT)"], rows)
+            th = _table(s, Inches(0.6), Inches(1.2), Inches(10.5), ["Country of Origin", "Qty (MT)", "Avg Unit Price (per KG)"], rows)
             _text(s, Inches(0.6), Inches(1.2) + th + Inches(0.2), Inches(11.7), Inches(0.9), narration, size=12, color=GREY)
 
     # Slide 6 — Last exporter data: top 5 competitors
@@ -295,11 +295,11 @@ def build_pptx(item, manual, imp_rows, imp_mapping, has_import_file, imp_headers
             cheapest = min(priced, key=lambda x: x[1]["priceAvg"]) if priced else None
             narration = f"{leader[0]} is the largest matched exporter by volume ({fmt_qty_mt(leader[1]['qty'])} MT)"
             if cheapest and cheapest[0] != leader[0]:
-                narration += f", while {cheapest[0]} offers the most competitive matched price at {fmt_price_per_mt(cheapest[1]['priceAvg'], cheapest[1]['currency'])}"
+                narration += f", while {cheapest[0]} offers the most competitive matched price at {fmt_price_per_kg(cheapest[1]['priceAvg'], cheapest[1]['currency'])}"
             narration += "."
             s = _blank_slide(prs)
             _header(s, f"Top Exporters — HS {item['hs']}")
-            th = _table(s, Inches(0.6), Inches(1.2), Inches(11.5), ["Exporter", "Country", "Qty (MT)", "Unit Price (per MT)"], rows)
+            th = _table(s, Inches(0.6), Inches(1.2), Inches(11.5), ["Exporter", "Country", "Qty (MT)", "Unit Price (per KG)"], rows)
             _text(s, Inches(0.6), Inches(1.2) + th + Inches(0.2), Inches(11.7), Inches(0.9), narration, size=12, color=GREY)
 
     # Slide 8 — Region-wise: exports
@@ -308,13 +308,13 @@ def build_pptx(item, manual, imp_rows, imp_mapping, has_import_file, imp_headers
         if rows:
             region_agg = aggregate_by(exp_rows, exp_mapping["expcountry"], exp_mapping)
             top_region = region_agg[0]
-            avg_str = fmt_price_per_mt(top_region[1]['priceAvg']) if top_region[1]["priceAvg"] is not None else "n/a"
+            avg_str = fmt_price_per_kg(top_region[1]['priceAvg']) if top_region[1]["priceAvg"] is not None else "n/a"
             narration = (f"{top_region[0]} is the dominant exporting country by volume in matched records "
                          f"({fmt_qty_mt(top_region[1]['qty'])} MT), averaging {avg_str}"
                          f"{' ' + top_region[1]['currency'] if top_region[1]['currency'] else ''}.")
             s = _blank_slide(prs)
             _header(s, "Region-wise Comparison — Exports (by Exporting Country)")
-            th = _table(s, Inches(0.6), Inches(1.2), Inches(10.5), ["Exporting Country", "Qty (MT)", "Avg Unit Price (per MT)"], rows)
+            th = _table(s, Inches(0.6), Inches(1.2), Inches(10.5), ["Exporting Country", "Qty (MT)", "Avg Unit Price (per KG)"], rows)
             _text(s, Inches(0.6), Inches(1.2) + th + Inches(0.2), Inches(11.7), Inches(0.9), narration, size=12, color=GREY)
 
     # Slide 9 — Exporter data based on selected item (full month x supplier matrix)
@@ -348,11 +348,11 @@ def build_pptx(item, manual, imp_rows, imp_mapping, has_import_file, imp_headers
     if show_import:
         ranked = landed_cost_ranked(imp_rows, imp_mapping, imp_headers, "supplier", limit=8)
         if ranked:
-            rows = [[str(i + 1), name, fmt_qty_mt(qty), fmt_price_per_mt(lc)] for i, (name, lc, qty) in enumerate(ranked)]
+            rows = [[str(i + 1), name, fmt_qty_mt(qty), fmt_price_per_kg(lc)] for i, (name, lc, qty) in enumerate(ranked)]
             cheapest_name, cheapest_lc, _ = ranked[0]
             priciest_name, priciest_lc, _ = ranked[-1]
             gap_pct = ((priciest_lc - cheapest_lc) / cheapest_lc * 100) if cheapest_lc > 0 else None
-            narration = f"{cheapest_name} is the most cost-effective supplier once real paid duties are included, at {fmt_price_per_mt(cheapest_lc)} PKR/MT."
+            narration = f"{cheapest_name} is the most cost-effective supplier once real paid duties are included, at {fmt_price_per_kg(cheapest_lc)} PKR/KG."
             if gap_pct is not None and priciest_name != cheapest_name:
                 narration += f" That's {gap_pct:.1f}% cheaper landed than {priciest_name}, the most expensive supplier shown here — a gap that unit price alone would not reveal."
             lc_cols = detect_landed_cost_columns(imp_headers)
@@ -360,7 +360,7 @@ def build_pptx(item, manual, imp_rows, imp_mapping, has_import_file, imp_headers
             narration += f" Formula: {formula}.{note}"
             s = _blank_slide(prs)
             _header(s, "Landed Cost Comparison — Real Cost After Duties & Taxes")
-            th = _table(s, Inches(0.6), Inches(1.2), Inches(10.5), ["#", "Supplier (Exporter)", "Qty (MT)", "Landed Cost / MT (PKR)"], rows)
+            th = _table(s, Inches(0.6), Inches(1.2), Inches(10.5), ["#", "Supplier (Exporter)", "Qty (MT)", "Landed Cost / KG (PKR)"], rows)
             _text(s, Inches(0.6), Inches(1.2) + th + Inches(0.2), Inches(11.7), Inches(1.3), narration, size=10.5, color=GREY)
 
     # Slide 12 — Price trend
