@@ -103,11 +103,22 @@ def restore_item(cat, uid):
 
 # ---------------- File upload / mapping ----------------
 
+def _read_excel_fast(uploaded_file):
+    # openpyxl (pandas' default .xlsx engine) is pure-Python and can take minutes on large
+    # files, especially on CPU-limited hosting. python-calamine is a Rust-based reader that's
+    # typically 10-20x faster; fall back to openpyxl only if it isn't installed or fails.
+    try:
+        return pd.read_excel(uploaded_file, dtype=object, engine="calamine")
+    except Exception:
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, dtype=object)
+
+
 def _read_upload(uploaded_file):
     name = uploaded_file.name
     ext = name.rsplit(".", 1)[-1].lower()
     if ext in ("xlsx", "xls"):
-        df = pd.read_excel(uploaded_file, dtype=object)
+        df = _read_excel_fast(uploaded_file)
     else:
         try:
             df = pd.read_csv(uploaded_file, dtype=object, encoding="utf-8")
