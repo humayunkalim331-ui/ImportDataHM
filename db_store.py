@@ -15,17 +15,40 @@ Connects to Turso in production (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN env vars)
 local SQLite file automatically when those aren't set, so this runs the same way in local
 testing as it will in production — same code path either way.
 """
+"""
+Database-backed customs data storage (Turso / libSQL).
+
+Replaces holding the full uploaded file in a pandas DataFrame in memory. Instead:
+  1. Upload streams into a database table in chunks (openpyxl read_only mode for Excel,
+     csv.reader for CSV) — memory stays flat regardless of file size, whether it's 246MB
+     or 50GB, because we never hold more than one chunk at a time.
+  2. Matching runs a broad SQL pre-filter (LIKE on HS Code / Item Description) to narrow
+     millions of rows down to a small candidate set, THEN hands that small set to the
+     existing, already-tested matching.py scoring functions for the precise match. This
+     avoids reimplementing the whole matching algorithm as SQL, while still never loading
+     the full dataset into memory.
+
+Connects to Turso in production (TURSO_DATABASE_URL / TURSO_AUTH_TOKEN env vars) and to a
+local SQLite file automatically when those aren't set, so this runs the same way in local
+testing as it will in production — same code path either way.
+
+Uses the `libsql` package (Turso's current official Python SDK), NOT the older
+`libsql-client` package. libsql-client used a WebSocket/HRANA protocol that Turso's free
+tier stopped supporting after migrating from Fly.io to AWS — it fails with
+WSServerHandshakeError against any current Turso database. `libsql` uses an HTTP-based
+protocol and a standard DB-API-style interface (connect/execute/commit/fetchall), same
+pattern as Python's built-in sqlite3 module.
+"""
 import os
 import csv
-import json
 import re
 import threading
 import openpyxl
-import libsql_client
+import libsql
 
 CHUNK_SIZE = 500  # rows per batch insert — keeps memory flat regardless of file size
 
-_client = None
+_conn = None
 # Serializes all database access. The local-file fallback (used whenever Turso isn't
 # configured) is a real SQLite file with real file-locking semantics — concurrent access
 # from multiple Streamlit sessions (e.g. several people opening the URL at once) throws
@@ -35,34 +58,54 @@ _client = None
 _db_lock = threading.Lock()
 
 
-def execute(sql, params=None):
-    """Serialized wrapper around client.execute() — use this instead of calling
-    get_client().execute() directly, so every caller (db_store and kv_store) benefits
-    from the same lock."""
-    client = get_client()
-    with _db_lock:
-        return client.execute(sql, params) if params is not None else client.execute(sql)
-
-
-def execute_batch(stmts):
-    client = get_client()
-    with _db_lock:
-        return client.batch(stmts)
+class _ResultAdapter:
+    """Wraps a libsql cursor to look like the old libsql_client ResultSet (.rows / .columns)
+    so the rest of this file — and kv_store.py — didn't need to change when the underlying
+    driver did."""
+    def __init__(self, cursor):
+        self.columns = [d[0] for d in (cursor.description or [])]
+        try:
+            self.rows = cursor.fetchall()
+        except Exception:
+            self.rows = []
 
 
 def get_client():
-    global _client
-    if _client is not None:
-        return _client
+    global _conn
+    if _conn is not None:
+        return _conn
     url = os.environ.get("TURSO_DATABASE_URL")
     token = os.environ.get("TURSO_AUTH_TOKEN")
     if url:
-        _client = libsql_client.create_client_sync(url, auth_token=token)
+        _conn = libsql.connect(database=url, auth_token=token)
     else:
         # Local dev / testing fallback — same API, same code path, no live Turso needed.
         local_path = os.environ.get("RM_ANALYZER_LOCAL_DB", "rm_analyzer_data.db")
-        _client = libsql_client.create_client_sync(f"file:{local_path}")
-    return _client
+        _conn = libsql.connect(database=local_path)
+    return _conn
+
+
+def execute(sql, params=None):
+    """Serialized wrapper around conn.execute() — use this instead of calling
+    get_client().execute() directly, so every caller (db_store and kv_store) benefits
+    from the same lock and the same result shape."""
+    conn = get_client()
+    with _db_lock:
+        cur = conn.execute(sql, params) if params is not None else conn.execute(sql)
+        conn.commit()
+        return _ResultAdapter(cur)
+
+
+def execute_batch(sql, params_list):
+    """Runs the same SQL statement with many different parameter sets in one call
+    (executemany) — used for chunked inserts, where every row in a chunk shares the same
+    INSERT template."""
+    if not params_list:
+        return
+    conn = get_client()
+    with _db_lock:
+        conn.executemany(sql, params_list)
+        conn.commit()
 
 
 def _safe_col_name(name):
@@ -139,11 +182,8 @@ def _insert_chunk(client, table, headers, rows_chunk):
         return
     col_list = ", ".join(_safe_col_name(h) for h in headers)
     placeholders = ", ".join("?" for _ in headers)
-    stmts = [
-        libsql_client.Statement(f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})", row)
-        for row in rows_chunk
-    ]
-    execute_batch(stmts)
+    sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+    execute_batch(sql, rows_chunk)
 
 
 def stream_upload_xlsx(file_key, file_path_or_stream, existing_headers=None):
