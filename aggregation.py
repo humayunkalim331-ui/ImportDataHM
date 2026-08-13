@@ -27,12 +27,22 @@ def fmt_qty_mt(qty_kg):
 
 
 def fmt_price_per_mt(price_per_kg, currency=None):
-    """Per-unit price converted to a per-MT basis, kept consistent with qty being shown in
-    MT — showing MT quantities next to a $/KG price would be a confusing unit mismatch."""
+    """Per-unit price converted to a per-MT basis. Not currently used in the UI — kept for
+    anyone who wants MT-basis pricing later — see fmt_price_per_kg for what's actually shown."""
     if price_per_kg is None:
         return "—"
     val = price_per_kg * KG_PER_MT
     return f"{val:,.2f}{' ' + currency if currency else ''}"
+
+
+def fmt_price_per_kg(price_per_kg, currency=None):
+    """Unit price displayed per KG — deliberately NOT converted to match the MT quantity
+    display. Per-KG pricing is the standard convention in chemical/commodity trading even
+    when volumes are discussed in tons, so qty (MT) and price (per KG) intentionally use
+    different bases here, per the director's explicit preference."""
+    if price_per_kg is None:
+        return "—"
+    return f"{price_per_kg:,.2f}{' ' + currency if currency else ''}"
 
 
 def num(v):
