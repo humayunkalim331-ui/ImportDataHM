@@ -19,12 +19,35 @@ import os
 import csv
 import json
 import re
+import threading
 import openpyxl
 import libsql_client
 
 CHUNK_SIZE = 500  # rows per batch insert — keeps memory flat regardless of file size
 
 _client = None
+# Serializes all database access. The local-file fallback (used whenever Turso isn't
+# configured) is a real SQLite file with real file-locking semantics — concurrent access
+# from multiple Streamlit sessions (e.g. several people opening the URL at once) throws
+# "SQLITE_BUSY: database is locked" without this, which crashes the request handling
+# that request and can surface to the browser as a connection error. Reproduced directly:
+# 20 concurrent operations without this lock threw SQLITE_BUSY on 13 of them.
+_db_lock = threading.Lock()
+
+
+def execute(sql, params=None):
+    """Serialized wrapper around client.execute() — use this instead of calling
+    get_client().execute() directly, so every caller (db_store and kv_store) benefits
+    from the same lock."""
+    client = get_client()
+    with _db_lock:
+        return client.execute(sql, params) if params is not None else client.execute(sql)
+
+
+def execute_batch(stmts):
+    client = get_client()
+    with _db_lock:
+        return client.batch(stmts)
 
 
 def get_client():
@@ -58,14 +81,14 @@ def init_table(file_key, headers):
     client = get_client()
     table = _table_name(file_key)
     cols_sql = ", ".join(f"{_safe_col_name(h)} TEXT" for h in headers)
-    client.execute(f"CREATE TABLE IF NOT EXISTS {table} (_row_id INTEGER PRIMARY KEY AUTOINCREMENT, {cols_sql})")
+    execute(f"CREATE TABLE IF NOT EXISTS {table} (_row_id INTEGER PRIMARY KEY AUTOINCREMENT, {cols_sql})")
 
-    rs = client.execute(f"SELECT * FROM {table} LIMIT 0")
+    rs = execute(f"SELECT * FROM {table} LIMIT 0")
     existing_cols = set(rs.columns)
     for h in headers:
         if h not in existing_cols:
             try:
-                client.execute(f"ALTER TABLE {table} ADD COLUMN {_safe_col_name(h)} TEXT")
+                execute(f"ALTER TABLE {table} ADD COLUMN {_safe_col_name(h)} TEXT")
             except Exception:
                 pass  # column may already exist from a concurrent upload — non-fatal either way
     return table
@@ -73,7 +96,7 @@ def init_table(file_key, headers):
 
 def drop_table(file_key):
     client = get_client()
-    client.execute(f"DROP TABLE IF EXISTS {_table_name(file_key)}")
+    execute(f"DROP TABLE IF EXISTS {_table_name(file_key)}")
 
 
 def ensure_indexes(file_key, mapping):
@@ -86,7 +109,7 @@ def ensure_indexes(file_key, mapping):
         if col:
             idx_name = f"idx_{table}_{role}".replace(" ", "_")
             try:
-                client.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({_safe_col_name(col)})")
+                execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({_safe_col_name(col)})")
             except Exception:
                 pass  # indexing is a performance nice-to-have, never block on it
 
@@ -95,7 +118,7 @@ def row_count(file_key):
     client = get_client()
     table = _table_name(file_key)
     try:
-        rs = client.execute(f"SELECT COUNT(*) FROM {table}")
+        rs = execute(f"SELECT COUNT(*) FROM {table}")
         return rs.rows[0][0]
     except Exception:
         return 0
@@ -105,7 +128,7 @@ def get_headers(file_key):
     client = get_client()
     table = _table_name(file_key)
     try:
-        rs = client.execute(f"SELECT * FROM {table} LIMIT 0")
+        rs = execute(f"SELECT * FROM {table} LIMIT 0")
         return [c for c in rs.columns if c != "_row_id"]
     except Exception:
         return []
@@ -120,7 +143,7 @@ def _insert_chunk(client, table, headers, rows_chunk):
         libsql_client.Statement(f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})", row)
         for row in rows_chunk
     ]
-    client.batch(stmts)
+    execute_batch(stmts)
 
 
 def stream_upload_xlsx(file_key, file_path_or_stream, existing_headers=None):
@@ -210,7 +233,7 @@ def prefilter_candidates(file_key, mapping, item_name, item_hs, limit=5000):
 
     where = " OR ".join(clauses)
     sql = f"SELECT * FROM {table} WHERE {where} LIMIT {limit}"
-    rs = client.execute(sql, params)
+    rs = execute(sql, params)
     headers = [c for c in rs.columns if c != "_row_id"]
     col_idx = {c: i for i, c in enumerate(rs.columns)}
     records = [{h: row[col_idx[h]] for h in headers} for row in rs.rows]
