@@ -94,33 +94,35 @@ def extract_code_tokens(name):
 
 
 def desc_score_series(item_name, desc_series):
-    """Vectorized port of descScore() — returns a float Series (0..1) per row."""
-    row_compact = desc_series.fillna("").astype(str).map(compact)
+    """Vectorized port of descScore() — returns a float Series (0..1) per row.
+    Deduplicates by unique description value first (same pattern as hs_match_series), since
+    real customs files can have 100k+ rows with tens of thousands of exact-duplicate
+    descriptions — computing a fresh word-set object per row instead of per unique value was
+    measured to cost 100MB+ of avoidable memory for a single item comparison."""
     code_tokens = extract_code_tokens(item_name)
-    if code_tokens:
-        mask = pd.Series(True, index=desc_series.index)
-        for ct in code_tokens:
-            mask &= row_compact.str.contains(re.escape(ct), regex=True, na=False)
-        return mask.astype(float)
-
     item_compact = compact(item_name)
-    scores = pd.Series(0.0, index=desc_series.index)
-    if len(item_compact) >= 4:
-        phrase_mask = row_compact.str.contains(re.escape(item_compact), regex=True, na=False)
-        reverse_mask = row_compact.map(lambda rc: bool(rc) and rc in item_compact)
-        scores = (phrase_mask | reverse_mask).astype(float)
-
     item_words = list(dict.fromkeys(norm_words(item_name)))
-    if not item_words:
-        return scores
-    distinctive = [w for w in item_words if w not in GENERIC_MATCH_WORDS]
-    if not distinctive:
-        return scores
-
-    row_words = desc_series.fillna("").astype(str).map(lambda s: set(norm_words(s)))
+    distinctive = [w for w in item_words if w not in GENERIC_MATCH_WORDS] if item_words else []
     n_words = len(item_words)
-    word_scores = row_words.map(lambda rw: sum(1 for w in item_words if w in rw) / n_words)
-    return pd.Series(np.maximum(scores.values, word_scores.values), index=desc_series.index)
+
+    def score_one(s):
+        rc = compact(s)
+        if code_tokens:
+            return 1.0 if all(ct in rc for ct in code_tokens) else 0.0
+        sc = 0.0
+        if len(item_compact) >= 4 and rc:
+            if item_compact in rc or rc in item_compact:
+                sc = 1.0
+        if not item_words or not distinctive:
+            return sc
+        rw = set(norm_words(s))
+        word_score = sum(1 for w in item_words if w in rw) / n_words
+        return max(sc, word_score)
+
+    filled = desc_series.fillna("").astype(str)
+    uniques = filled.unique()
+    lookup = {u: score_one(u) for u in uniques}
+    return filled.map(lookup).astype(float)
 
 
 # ---------------- Date parsing ----------------

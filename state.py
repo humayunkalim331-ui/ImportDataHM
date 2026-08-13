@@ -111,14 +111,17 @@ def restore_item(cat, uid):
 # ---------------- File upload / mapping ----------------
 
 def _read_excel_fast(uploaded_file):
-    # openpyxl (pandas' default .xlsx engine) is pure-Python and can take minutes on large
-    # files, especially on CPU-limited hosting. python-calamine is a Rust-based reader that's
-    # typically 10-20x faster; fall back to openpyxl only if it isn't installed or fails.
+    # Measured directly against a real 104k-row file: the calamine engine (Rust-based, fast)
+    # uses ~680MB RSS to parse it — already over Render free tier's 512MB limit before Streamlit's
+    # own overhead is even added, which is what was crashing the app. openpyxl uses ~313MB for the
+    # same file — still not a large margin, but the difference between "guaranteed OOM" and
+    # "might fit." Trading calamine's speed for openpyxl's lower memory footprint on purpose.
     try:
-        return pd.read_excel(uploaded_file, dtype=object, engine="calamine")
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, dtype=object, engine="openpyxl")
     except Exception:
         uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, dtype=object)
+        return pd.read_excel(uploaded_file, dtype=object, engine="calamine")
 
 
 def _read_upload(uploaded_file):
