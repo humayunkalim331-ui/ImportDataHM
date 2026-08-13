@@ -273,7 +273,7 @@ def render_competitor_grid(rows, mapping, company_role):
                 p = agg.num(r.get(price_col))
                 table_rows.append({
                     "Date": d_str,
-                    "Price (per MT)": agg.fmt_price_per_mt(p) if p is not None else r.get(price_col, "—"),
+                    "Price (per KG)": agg.fmt_price_per_kg(p) if p is not None else r.get(price_col, "—"),
                     "Currency": r.get(mapping.get("currency"), "") if mapping.get("currency") else "",
                     "Qty (MT)": agg.fmt_qty_mt(q) if q is not None else "",
                 })
@@ -302,7 +302,7 @@ def render_top_table(rows, mapping, name_role, name_label, extras):
             rest = len(vals) - 3
             rec[label] = shown + (f" +{rest} more" if rest > 0 else "") if vals else "—"
         rec["Qty (MT)"] = agg.fmt_qty_mt(v['qty'])
-        rec["Unit Price (per MT)"] = agg.fmt_price_per_mt(v["priceAvg"], v["currency"])
+        rec["Unit Price (per KG)"] = agg.fmt_price_per_kg(v["priceAvg"], v["currency"])
         records.append(rec)
     st.dataframe(pd.DataFrame(records), hide_index=True, width='stretch')
 
@@ -326,7 +326,7 @@ def render_landed_cost(rows, mapping, headers):
     st.info(f"**How this is calculated:** {formula}, quantity-weighted across shipments.{note}")
     df = pd.DataFrame([
         {"#": i + 1, "Supplier (Exporter)": name, "Qty (MT)": agg.fmt_qty_mt(qty),
-         "Landed Cost / MT (PKR)": agg.fmt_price_per_mt(lc)}
+         "Landed Cost / KG (PKR)": agg.fmt_price_per_kg(lc)}
         for i, (name, lc, qty) in enumerate(ranked)
     ])
     st.dataframe(df, hide_index=True, width='stretch')
@@ -342,7 +342,7 @@ def render_region_table(rows, mapping, region_role):
     top = agg.aggregate_by(rows, region_col, mapping)[:6]
     df = pd.DataFrame([
         {"Region": name,
-         "Avg Unit Price (per MT)": agg.fmt_price_per_mt(v["priceAvg"], v["currency"]),
+         "Avg Unit Price (per KG)": agg.fmt_price_per_kg(v["priceAvg"], v["currency"]),
          "Qty (MT)": agg.fmt_qty_mt(v['qty'])}
         for name, v in top
     ])
@@ -371,10 +371,10 @@ def render_company_month_matrix(rows, mapping, company_role, label):
                 row_out[col_label] = "—"
             else:
                 avg = cell["wsum"] / cell["wqty"] if cell["wqty"] > 0 else (cell["sum"] / cell["n"] if cell["n"] else 0)
-                row_out[col_label] = f"{agg.fmt_qty_mt(cell['qty'])} MT @ {agg.fmt_price_per_mt(avg)}"
+                row_out[col_label] = f"{agg.fmt_qty_mt(cell['qty'])} MT @ {agg.fmt_price_per_kg(avg)}/KG"
         records.append(row_out)
     st.dataframe(pd.DataFrame(records), hide_index=True, width='stretch')
-    st.caption("Each cell: total quantity (MT) @ quantity-weighted average unit price (per MT), by month.")
+    st.caption("Each cell: total quantity (MT) @ quantity-weighted average unit price (per KG), by month.")
 
 
 # ==================== Detail view ====================
