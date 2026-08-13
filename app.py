@@ -23,6 +23,13 @@ div[data-testid="stMetricValue"] { color: #d4a755; }
 </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data(show_spinner=False)
+def _cached_rows_for_item(df, mapping, item, file_key, period, period_from, period_to):
+    # rows_for_item scans the full uploaded dataset (can be 100k+ rows) — caching this means
+    # a checkbox click elsewhere on the page no longer re-runs the whole match from scratch.
+    return matching.rows_for_item(df, mapping, item, file_key, period, period_from, period_to)
+
+
 PERIOD_OPTIONS = [
     ("all", "All time"), ("0-6", "0–6 months"), ("6-12", "6–12 months"),
     ("0-12", "Last 12 months"), ("12-24", "12–24 months ago"), ("custom", "Custom range"),
@@ -428,12 +435,12 @@ def render_detail(uid):
     wits_mapping = (wits_rec or {}).get("mapping", {}) or {}
 
     with st.spinner("Matching item against uploaded customs data…"):
-        imp_df = matching.rows_for_item(imp_rec["rows"], imp_mapping, item, "import",
-                                         st.session_state.period, period_from, period_to) if imp_rec else pd.DataFrame()
-        exp_df = matching.rows_for_item(exp_rec["rows"], exp_mapping, item, "export",
-                                         st.session_state.period, period_from, period_to) if exp_rec else pd.DataFrame()
-        wits_df = matching.rows_for_item(wits_rec["rows"], wits_mapping, item, "wits",
-                                          st.session_state.period, period_from, period_to) if wits_rec else pd.DataFrame()
+        imp_df = _cached_rows_for_item(imp_rec["rows"], imp_mapping, item, "import",
+                                        st.session_state.period, period_from, period_to) if imp_rec else pd.DataFrame()
+        exp_df = _cached_rows_for_item(exp_rec["rows"], exp_mapping, item, "export",
+                                        st.session_state.period, period_from, period_to) if exp_rec else pd.DataFrame()
+        wits_df = _cached_rows_for_item(wits_rec["rows"], wits_mapping, item, "wits",
+                                         st.session_state.period, period_from, period_to) if wits_rec else pd.DataFrame()
 
     imp_rows = imp_df.to_dict("records")
     exp_rows = exp_df.to_dict("records")
