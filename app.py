@@ -1,4 +1,5 @@
 """RM Procurement Analyzer — Gatronova. Streamlit port of the original HTML/JS tool."""
+import os
 import re
 from datetime import date
 
@@ -124,9 +125,13 @@ def render_file_card(ft):
 
 def render_upload_section():
     st.caption(_file_summary_text())
-    st.caption("Uploaded data lives for this browser session only — if the app disconnects "
-               "or restarts, you'll need to re-upload. Column mappings, custom items, and "
-               "saved positions are not affected.")
+    turso_configured = bool(os.environ.get("TURSO_DATABASE_URL"))
+    if turso_configured:
+        st.caption("✅ Connected to Turso — uploaded data persists permanently across sessions and restarts.")
+    else:
+        st.caption("⚠️ TURSO_DATABASE_URL is not set — uploaded data is using temporary local storage and "
+                   "will be lost on the next restart. Add TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in your "
+                   "app's Secrets/Environment settings to make uploads permanent.")
     with st.expander("Manage data sources", expanded=st.session_state.uploads_expanded):
         cols = st.columns(3)
         for col, ft in zip(cols, items_mod.FILE_TYPES):
