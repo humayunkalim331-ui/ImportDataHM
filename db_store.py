@@ -46,7 +46,11 @@ import threading
 import openpyxl
 import libsql
 
-CHUNK_SIZE = 500  # rows per batch insert — keeps memory flat regardless of file size
+CHUNK_SIZE = 3000  # rows per batch insert — larger batches mean far fewer network round
+# trips against a remote Turso database, which is what actually dominates upload time (each
+# round trip carries real network latency; Turso's own docs note this explicitly). At ~39
+# columns and roughly 30 bytes/cell as text, a 3000-row batch is a few MB — comfortably
+# under typical request-size limits while cutting round trips roughly 6x versus 500.
 
 _conn = None
 # Serializes all database access. The local-file fallback (used whenever Turso isn't
@@ -70,8 +74,14 @@ class _ResultAdapter:
             self.rows = []
 
 
-def get_client():
+def get_client(force_new=False):
+    """Returns the cached connection, or creates a fresh one. Pass force_new=True after a
+    failed call — the server-side session behind a cached connection can expire between
+    requests (Turso returns "stream not found" when this happens), and the fix is simply
+    to reconnect, not to treat it as a real error."""
     global _conn
+    if force_new:
+        _conn = None
     if _conn is not None:
         return _conn
     url = os.environ.get("TURSO_DATABASE_URL")
@@ -88,24 +98,37 @@ def get_client():
 def execute(sql, params=None):
     """Serialized wrapper around conn.execute() — use this instead of calling
     get_client().execute() directly, so every caller (db_store and kv_store) benefits
-    from the same lock and the same result shape."""
-    conn = get_client()
-    with _db_lock:
-        cur = conn.execute(sql, params) if params is not None else conn.execute(sql)
-        conn.commit()
-        return _ResultAdapter(cur)
+    from the same lock, the same result shape, and the same stale-connection retry."""
+    last_err = None
+    for attempt in range(2):
+        try:
+            with _db_lock:
+                conn = get_client(force_new=(attempt > 0))
+                cur = conn.execute(sql, params) if params is not None else conn.execute(sql)
+                conn.commit()
+                return _ResultAdapter(cur)
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 
 def execute_batch(sql, params_list):
     """Runs the same SQL statement with many different parameter sets in one call
     (executemany) — used for chunked inserts, where every row in a chunk shares the same
-    INSERT template."""
+    INSERT template. Same reconnect-and-retry as execute()."""
     if not params_list:
         return
-    conn = get_client()
-    with _db_lock:
-        conn.executemany(sql, params_list)
-        conn.commit()
+    last_err = None
+    for attempt in range(2):
+        try:
+            with _db_lock:
+                conn = get_client(force_new=(attempt > 0))
+                conn.executemany(sql, params_list)
+                conn.commit()
+                return
+        except Exception as e:
+            last_err = e
+    raise last_err
 
 
 def _safe_col_name(name):
